@@ -1,0 +1,68 @@
+@baseUrl = http://localhost:5254
+@token = replace-with-manager-jwt
+@serviceId = 1
+@stageId = 1
+
+### Get service details, stages, discussions, messages, and assessments
+GET {{baseUrl}}/api/v1/Manager/GetServiceById?serviceId={{serviceId}}
+Authorization: Bearer {{token}}
+
+### Assign an active case executor
+PUT {{baseUrl}}/api/v1/Manager/AssignExecutor
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "shipmentId": {{serviceId}},
+  "caseExecutorId": 2
+}
+
+### Escalate a service
+POST {{baseUrl}}/api/v1/Manager/EscalateService
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "serviceId": {{serviceId}},
+  "reason": "Service requires management review",
+  "notes": "Please review the outstanding clearance issue."
+}
+
+### Notify the importer
+POST {{baseUrl}}/api/v1/Manager/NotifyImporter
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "serviceId": {{serviceId}},
+  "subject": "Service update",
+  "message": "Please provide the outstanding consignment document.",
+  "isUrgent": false
+}
+
+### Get documents for a stage
+GET {{baseUrl}}/api/v1/Manager/GetStageDocuments?serviceId={{serviceId}}&stageId={{stageId}}
+Authorization: Bearer {{token}}
+
+### Get discussion for a stage
+GET {{baseUrl}}/api/v1/Manager/GetStageDiscussions?serviceId={{serviceId}}&stageId={{stageId}}
+Authorization: Bearer {{token}}
+
+### Add a stage discussion comment
+POST {{baseUrl}}/api/v1/Manager/AddStageDiscussion
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "serviceId": {{serviceId}},
+  "stageId": {{stageId}},
+  "comment": "The uploaded documents are being reviewed."
+}
+
+### Get consignment and transport details
+GET {{baseUrl}}/api/v1/Manager/GetConsignmentDetails?serviceId={{serviceId}}
+Authorization: Bearer {{token}}
+
+### Get recent service activities
+GET {{baseUrl}}/api/v1/Manager/GetServiceActivities?serviceId={{serviceId}}
+Authorization: Bearer {{token}}
