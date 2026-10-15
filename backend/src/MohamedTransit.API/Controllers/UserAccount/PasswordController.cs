@@ -18,7 +18,6 @@ public class PasswordController : BaseController
         var result = await _mediator.Send(command);
         return result.IsError ? HandleErrorResponse(result.Errors) : HandleSuccessResponse(result.Payload);
     }
-
     [HttpPost("ResetPassword")]
     public async Task<IActionResult> ResetPassword([FromBody] PasswordRequest request)
     {

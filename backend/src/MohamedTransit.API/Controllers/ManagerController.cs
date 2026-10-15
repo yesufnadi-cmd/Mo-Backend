@@ -9,6 +9,7 @@ using MohamedTransit.API.DTO.MOT.Request;
 using MohamedTransit.API.DTO.MOT.Response;
 using MohamedTransit.API.Helpers;
 using MohamedTransit.Application;
+using MohamedTransit.Application.Queries.Manager;
 using MohamedTransit.Domain.Data;
 using MohamedTransit.Domain.Entities;
 
@@ -179,6 +180,22 @@ public class ManagerController : BaseController
 
         return HandleSuccessResponse(dashboard);
     }
+    [HttpGet("GetServiceById/{serviceId}")]
+public async Task<IActionResult> GetServiceById(long serviceId)
+{
+    var result = await _mediator.Send(new GetServiceByIdQuery(serviceId));
+    if (result.IsError)
+    {
+        return NotFound(result);
+    }
+    return Ok(result);
+}
+[HttpGet("GetStageDocuments/{serviceId}")]
+public async Task<IActionResult> GetStageDocuments(long serviceId)
+{
+    var result = await _mediator.Send(new GetStageDocumentsQuery(serviceId));
+    return Ok(result);
+}
 
     /// <summary>
     /// Get live reporting metrics for the manager analytics page.

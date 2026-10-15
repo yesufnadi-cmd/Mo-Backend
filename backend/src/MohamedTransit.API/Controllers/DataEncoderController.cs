@@ -10,6 +10,7 @@ using MohamedTransit.API.Helpers;
 using MohamedTransit.API.Services;
 using MohamedTransit.Application.Commands.Shipment;
 using MohamedTransit.Application.DTO;
+using MohamedTransit.Application.Helper;
 using MohamedTransit.Application.Queries;
 using MohamedTransit.Domain.Common;
 using MohamedTransit.Domain.Data;
@@ -40,17 +41,35 @@ public class DataEncoderController : BaseController
     /// Create a new customer
     /// </summary>
     [HttpPost("CreateCustomer")]
-    public async Task<IActionResult> CreateCustomer([FromBody] MohamedTransit.API.DTO.MasterData.Request.CreateCustomerRequest request)
+    public async Task<IActionResult> CreateCustomer(
+        [FromBody] MohamedTransit.API.DTO.MasterData.Request.CreateCustomerRequest request,
+        CancellationToken cancellationToken)
     {
         var currentUserId = JwtHelper.GetCurrentUserId(_httpContextAccessor, _context);
         if (currentUserId == null)
             return Unauthorized("User not authenticated");
-        // Check if user already exists
-        var existingUser = await _context.Customers
-            .FirstOrDefaultAsync(u => u.Id == request.UserId);
+        if (!await IsDataEncoder(currentUserId.Value, cancellationToken))
+            return Forbid();
+        if (request.UserId <= 0)
+            return BadRequest("A valid customer user ID is required.");
 
-        if (existingUser != null)
-            return BadRequest("User with this email or username already exists");
+        var isActiveCustomerUser = await _context.Users
+            .AsNoTracking()
+            .AnyAsync(user =>
+                user.Id == request.UserId &&
+                user.RecordStatus == RecordStatus.Active &&
+                user.UserRoles.Any(userRole =>
+                    userRole.Role.RecordStatus == RecordStatus.Active &&
+                    userRole.Role.Name.ToLower() == "customer"),
+                cancellationToken);
+        if (!isActiveCustomerUser)
+            return BadRequest("The selected user is not an active customer account.");
+
+        var customerAlreadyExists = await _context.Customers
+            .AsNoTracking()
+            .AnyAsync(customer => customer.UserId == request.UserId, cancellationToken);
+        if (customerAlreadyExists)
+            return Conflict("A customer profile already exists for this user.");
 
         // Create customer profile
         var customer = Customer.Create(
@@ -72,9 +91,27 @@ public class DataEncoderController : BaseController
         );
 
         _context.Customers.Add(customer);
-        await _context.SaveChangesAsync();
+        await _context.SaveChangesAsync(cancellationToken);
 
-        return HandleSuccessResponse(customer);
+        return HandleSuccessResponse(new
+        {
+            customer.Id,
+            customer.BusinessName,
+            customer.TINNumber,
+            customer.BusinessLicense,
+            customer.BusinessAddress,
+            customer.City,
+            customer.State,
+            customer.PostalCode,
+            customer.ContactPerson,
+            customer.ContactPhone,
+            customer.ContactEmail,
+            customer.BusinessType,
+            customer.ImportLicense,
+            customer.ImportLicenseExpiry,
+            customer.UserId,
+            customer.IsVerified
+        });
     }
 
     /// <summary>
@@ -85,6 +122,12 @@ public class DataEncoderController : BaseController
         RecordStatus? recordStatus,
         CancellationToken cancellationToken)
     {
+        var currentUserId = JwtHelper.GetCurrentUserId(_httpContextAccessor, _context);
+        if (currentUserId == null)
+            return Unauthorized("User not authenticated");
+        if (!await IsDataEncoder(currentUserId.Value, cancellationToken))
+            return Forbid();
+
         var query = new GetAllCustomersQuery { RecordStatus = recordStatus };
         var result = await _mediator.Send(query, cancellationToken);
         if (result.IsError)
@@ -106,6 +149,7 @@ public class DataEncoderController : BaseController
         var activeCasesByImporter = await _context.Shipments
             .Where(shipment =>
                 customerUserIds.Contains(shipment.ImporterId) &&
+                shipment.RecordStatus == RecordStatus.Active &&
                 activeStatuses.Contains(shipment.Status))
             .GroupBy(shipment => shipment.ImporterId)
             .Select(group => new { ImporterId = group.Key, Count = group.Count() })
@@ -129,14 +173,29 @@ public class DataEncoderController : BaseController
     /// Update customer information before approval
     /// </summary>
     [HttpPut("UpdateCustomer")]
-    public async Task<IActionResult> UpdateCustomer([FromBody] MohamedTransit.API.DTO.MOT.Request.UpdateCustomerRequest request)
+    public async Task<IActionResult> UpdateCustomer(
+        [FromBody] MohamedTransit.API.DTO.MOT.Request.UpdateCustomerRequest request,
+        CancellationToken cancellationToken)
     {
+        var currentUserId = JwtHelper.GetCurrentUserId(_httpContextAccessor, _context);
+        if (currentUserId == null)
+            return Unauthorized("User not authenticated");
+        if (!await IsDataEncoder(currentUserId.Value, cancellationToken))
+            return Forbid();
+        if (request.Id <= 0)
+            return BadRequest("A valid customer ID is required.");
+
         var customer = await _context.Customers
-            .Include(c => c.User)
-            .FirstOrDefaultAsync(c => c.Id == request.Id);
+            .FirstOrDefaultAsync(c =>
+                c.Id == request.Id &&
+                c.CreatedByDataEncoderId == currentUserId.Value &&
+                c.RecordStatus == RecordStatus.Active,
+                cancellationToken);
 
         if (customer == null)
-            return NotFound("Customer not found or not created by you");
+            return NotFound("Customer not found.");
+        if (customer.IsVerified)
+            return Conflict("Verified customer information cannot be changed.");
 
 
         customer.UpdateBusinessInfo(
@@ -150,11 +209,24 @@ public class DataEncoderController : BaseController
             request.ContactEmail
         );
 
-        await _context.SaveChangesAsync();
+        await _context.SaveChangesAsync(cancellationToken);
 
-        return HandleSuccessResponse(customer);
+        return HandleSuccessResponse(new
+        {
+            customer.Id,
+            customer.BusinessName,
+            customer.BusinessAddress,
+            customer.City,
+            customer.State,
+            customer.PostalCode,
+            customer.ContactPerson,
+            customer.ContactPhone,
+            customer.ContactEmail,
+            customer.IsVerified
+        });
     }
     // POST: api/v1/DataEncoder/services
+    [HttpPost("services")]
     [HttpPost("Create services")]
     public async Task<IActionResult> CreateService([FromBody] CreateServiceRequestDto request, CancellationToken cancellationToken)
     {
@@ -165,7 +237,7 @@ public class DataEncoderController : BaseController
         if (currentUserId == null)
             return Unauthorized("User not authenticated");
 
-        if (!await IsDataEncoder(currentUserId.Value))
+        if (!await IsDataEncoder(currentUserId.Value, cancellationToken))
             return Forbid();
 
         if (request.CustomerId <= 0 ||
@@ -192,7 +264,8 @@ public class DataEncoderController : BaseController
             .AsNoTracking()
             .FirstOrDefaultAsync(
                 customer => customer.Id == request.CustomerId &&
-                            customer.CreatedByDataEncoderId == currentUserId.Value,
+                            customer.CreatedByDataEncoderId == currentUserId.Value &&
+                            customer.RecordStatus == RecordStatus.Active,
                 cancellationToken);
         if (customer == null)
             return NotFound("Customer not found for this data encoder.");
@@ -223,6 +296,11 @@ public class DataEncoderController : BaseController
         service.SetCreatedByDataEncoder(currentUserId.Value);
         service.AssignmentNotes = request.Notes?.Trim();
 
+        foreach (var stage in DefaultServiceWorkflowStages.CreateFor(service, serviceType.Value))
+        {
+            service.AddStage(stage);
+        }
+
         _context.Shipments.Add(service);
         await _context.SaveChangesAsync(cancellationToken);
 
@@ -247,12 +325,13 @@ public class DataEncoderController : BaseController
         var currentUserId = JwtHelper.GetCurrentUserId(_httpContextAccessor, _context);
         if (currentUserId == null)
             return Unauthorized("User not authenticated");
-        if (!await IsDataEncoder(currentUserId.Value))
+        if (!await IsDataEncoder(currentUserId.Value, cancellationToken))
             return Forbid();
 
         var service = await _context.Shipments.FirstOrDefaultAsync(
             shipment => shipment.Id == id &&
-                        shipment.CreatedByDataEncoderId == currentUserId.Value,
+                        shipment.CreatedByDataEncoderId == currentUserId.Value &&
+                        shipment.RecordStatus == RecordStatus.Active,
             cancellationToken);
         if (service == null)
             return NotFound("Service not found");
@@ -261,7 +340,44 @@ public class DataEncoderController : BaseController
         if (!Enum.IsDefined(typeof(ServiceType), request.ServiceType))
             return BadRequest("A valid service type is required.");
 
+        var serviceTypeChanged = service.ServiceType != request.ServiceType;
+        if (serviceTypeChanged)
+        {
+            var existingStages = await _context.ServiceStageExecutions
+                .Where(stage => stage.ShipmentId == service.Id)
+                .ToListAsync(cancellationToken);
+            var stageIds = existingStages.Select(stage => stage.Id).ToArray();
+            var hasStageData = stageIds.Length > 0 &&
+                (await _context.StageDocuments.AnyAsync(
+                    document => document.ServiceStageId.HasValue &&
+                                stageIds.Contains(document.ServiceStageId.Value),
+                    cancellationToken) ||
+                 await _context.StageComments.AnyAsync(
+                    comment => comment.ServiceStageId.HasValue &&
+                               stageIds.Contains(comment.ServiceStageId.Value),
+                    cancellationToken) ||
+                 await _context.Transports.AnyAsync(
+                    transport => transport.ServiceStageId.HasValue &&
+                                 stageIds.Contains(transport.ServiceStageId.Value),
+                    cancellationToken));
+            var hasProgress = existingStages.Any(stage =>
+                stage.Status != (stage.SequenceOrder == 1 ? StageStatus.InProgress : StageStatus.NotStarted));
+
+            if (hasStageData || hasProgress)
+                return Conflict("The service type cannot be changed after workflow stage activity has started.");
+
+            _context.ServiceStageExecutions.RemoveRange(existingStages);
+        }
+
         service.UpdateServiceType(request.ServiceType);
+        if (serviceTypeChanged)
+        {
+            foreach (var stage in DefaultServiceWorkflowStages.CreateFor(service, request.ServiceType))
+            {
+                service.AddStage(stage);
+            }
+        }
+
         await _context.SaveChangesAsync(cancellationToken);
 
         return HandleSuccessResponse(new { Success = true, Message = "Service type updated successfully." });
@@ -275,13 +391,14 @@ public class DataEncoderController : BaseController
         var currentUserId = JwtHelper.GetCurrentUserId(_httpContextAccessor, _context);
         if (currentUserId == null)
             return Unauthorized("User not authenticated");
-        if (!await IsDataEncoder(currentUserId.Value))
+        if (!await IsDataEncoder(currentUserId.Value, cancellationToken))
             return Forbid();
 
         var service = await _context.Shipments
             .FirstOrDefaultAsync(
                 shipment => shipment.Id == id &&
-                            shipment.CreatedByDataEncoderId == currentUserId.Value,
+                            shipment.CreatedByDataEncoderId == currentUserId.Value &&
+                            shipment.RecordStatus == RecordStatus.Active,
                 cancellationToken);
 
         if (service == null)
@@ -331,19 +448,32 @@ public class DataEncoderController : BaseController
         var currentUserId = JwtHelper.GetCurrentUserId(_httpContextAccessor, _context);
         if (currentUserId == null)
             return Unauthorized("User not authenticated");
-        if (!await IsDataEncoder(currentUserId.Value))
+        if (!await IsDataEncoder(currentUserId.Value, cancellationToken))
             return Forbid();
 
         var service = await _context.Shipments.FirstOrDefaultAsync(
             shipment => shipment.Id == id &&
-                        shipment.CreatedByDataEncoderId == currentUserId.Value,
+                        shipment.CreatedByDataEncoderId == currentUserId.Value &&
+                        shipment.RecordStatus == RecordStatus.Active,
             cancellationToken);
         if (service == null)
             return NotFound("Service not found");
 
-        if (service.Status != ShipmentStatus.Submitted)
-            service.Submit();
+        if (service.Status != ShipmentStatus.Draft)
+            return Conflict("Only draft services can be submitted.");
 
+        var stagesExist = await _context.ServiceStageExecutions
+            .AnyAsync(stage => stage.ShipmentId == service.Id, cancellationToken);
+        if (!stagesExist)
+        {
+            var serviceType = service.ServiceType ?? ServiceType.Multimodal;
+            foreach (var stage in DefaultServiceWorkflowStages.CreateFor(service, serviceType))
+            {
+                service.AddStage(stage);
+            }
+        }
+
+        service.Submit();
         await _context.SaveChangesAsync(cancellationToken);
 
         return HandleSuccessResponse(new { Success = true, Message = "Service submitted successfully and locked for approval." });
@@ -356,10 +486,14 @@ public class DataEncoderController : BaseController
         var currentUserId = JwtHelper.GetCurrentUserId(_httpContextAccessor, _context);
         if (currentUserId == null)
             return Unauthorized("User not authenticated");
+        if (!await IsDataEncoder(currentUserId.Value, cancellationToken))
+            return Forbid();
 
         var services = await _context.Shipments
             .AsNoTracking()
-            .Where(service => service.CreatedByDataEncoderId == currentUserId.Value)
+            .Where(service =>
+                service.CreatedByDataEncoderId == currentUserId.Value &&
+                service.RecordStatus == RecordStatus.Active)
             .OrderByDescending(service => service.CreateAt)
             .Select(service => new ShipmentDetail
             {
@@ -377,11 +511,15 @@ public class DataEncoderController : BaseController
                 RiskLevel = service.RiskLevel,
                 CustomerId = service.ImporterId,
                 ImporterName = _context.Customers
-                    .Where(customer => customer.UserId == service.ImporterId)
+                    .Where(customer =>
+                        customer.UserId == service.ImporterId &&
+                        customer.RecordStatus == RecordStatus.Active)
                     .Select(customer => customer.BusinessName)
                     .FirstOrDefault() ?? string.Empty,
                 ImporterTinNumber = _context.Customers
-                    .Where(customer => customer.UserId == service.ImporterId)
+                    .Where(customer =>
+                        customer.UserId == service.ImporterId &&
+                        customer.RecordStatus == RecordStatus.Active)
                     .Select(customer => customer.TINNumber)
                     .FirstOrDefault() ?? string.Empty,
                 AssignedCaseExecutorId = service.AssignedCaseExecutorId,
@@ -416,22 +554,52 @@ public class DataEncoderController : BaseController
     [HttpGet("documents")]
     public async Task<IActionResult> GetAllDocuments(CancellationToken cancellationToken)
     {
+        var currentUserId = JwtHelper.GetCurrentUserId(_httpContextAccessor, _context);
+        if (currentUserId == null)
+            return Unauthorized("User not authenticated");
+        if (!await IsDataEncoder(currentUserId.Value, cancellationToken))
+            return Forbid();
+
         var documents = await _context.ServiceDocuments
-            .Include(d => d.Shipment)
-            .OrderByDescending(d => d.CreateAt)
+            .AsNoTracking()
+            .Where(document =>
+                document.RecordStatus == RecordStatus.Active &&
+                document.Shipment != null &&
+                document.Shipment.RecordStatus == RecordStatus.Active &&
+                document.Shipment.CreatedByDataEncoderId == currentUserId.Value)
+            .OrderByDescending(document => document.CreateAt)
+            .Select(document => new
+            {
+                document.Id,
+                document.OriginalFileName,
+                document.DocumentType,
+                ServiceReference = document.Shipment!.TrackingNumber,
+                document.ShipmentStageId,
+                UploadedByFirstName = document.UploadedByUser == null
+                    ? null
+                    : document.UploadedByUser.FirstName,
+                UploadedByLastName = document.UploadedByUser == null
+                    ? null
+                    : document.UploadedByUser.LastName,
+                document.CreateAt,
+                document.RecordStatus
+            })
             .ToListAsync(cancellationToken);
 
-        var documentDtos = documents.Select(d => new
+        var documentDtos = documents.Select(document => new
         {
-            id = d.Id,
-            documentName = d.FileName,
-            documentType = d.DocumentType.ToString(),
+            id = document.Id,
+            documentName = document.OriginalFileName,
+            documentType = document.DocumentType.ToString(),
             // Reference ፋንታ የ Shipmentን Id መጠቀም (ወይም በሞዴልዎ ያለውን ትክክለኛ ስም ማስገባት)
-            serviceReference = d.Shipment != null ? d.Shipment.Id.ToString() : "SVC-0000",
-            stage = "N/A", // ሞዴሉ ላይ StageName ከሌለ በጊዜያዊነት
-            uploadedBy = "System", // ሞዴሉ ላይ UploadedByName ከሌለ
-            uploadedDate = d.CreateAt.ToString("dd MMM yyyy, HH:mm"),
-            status = "Active" // Status ከሌለ
+            serviceReference = document.ServiceReference,
+            stage = document.ShipmentStageId?.ToString() ?? "N/A",
+            uploadedBy = string.IsNullOrWhiteSpace(document.UploadedByFirstName) &&
+                         string.IsNullOrWhiteSpace(document.UploadedByLastName)
+                ? "System"
+                : $"{document.UploadedByFirstName} {document.UploadedByLastName}".Trim(),
+            uploadedDate = document.CreateAt.ToString("dd MMM yyyy, HH:mm"),
+            status = document.RecordStatus.ToString()
         });
 
         return Ok(new { Success = true, Data = documentDtos });
@@ -440,44 +608,63 @@ public class DataEncoderController : BaseController
     /// Get data encoder dashboard
     /// </summary>
     [HttpGet("GetDashboard")]
-    public async Task<IActionResult> GetDashboard()
+    public async Task<IActionResult> GetDashboard(CancellationToken cancellationToken)
     {
         var currentUserId = JwtHelper.GetCurrentUserId(_httpContextAccessor, _context);
         if (currentUserId == null)
             return Unauthorized("User not authenticated");
+        if (!await IsDataEncoder(currentUserId.Value, cancellationToken))
+            return Forbid();
 
         var now = DateTime.UtcNow;
         var serviceReviewStatuses = new[] { ShipmentStatus.Submitted, ShipmentStatus.UnderReview };
 
         var dashboard = new MohamedTransit.API.DTO.MOT.Response.DataEncoderDashboardResponse
         {
-            TotalCustomersCreated = await _context.Customers.CountAsync(c => c.CreatedByDataEncoderId == currentUserId.Value),
-            PendingCustomerApprovals = await _context.Customers.CountAsync(c => c.CreatedByDataEncoderId == currentUserId.Value && !c.IsVerified),
-            TotalServicesCreated = await _context.Shipments.CountAsync(s => s.CreatedByDataEncoderId == currentUserId.Value),
-            PendingServiceApprovals = await _context.Shipments.CountAsync(s => s.CreatedByDataEncoderId == currentUserId.Value && s.Status == ShipmentStatus.Submitted),
-            DraftServices = await _context.Shipments.CountAsync(s => s.CreatedByDataEncoderId == currentUserId.Value && s.Status == ShipmentStatus.Draft),
+            TotalCustomersCreated = await _context.Customers.CountAsync(c =>
+                c.CreatedByDataEncoderId == currentUserId.Value &&
+                c.RecordStatus == RecordStatus.Active, cancellationToken),
+            PendingCustomerApprovals = await _context.Customers.CountAsync(c =>
+                c.CreatedByDataEncoderId == currentUserId.Value &&
+                c.RecordStatus == RecordStatus.Active &&
+                !c.IsVerified, cancellationToken),
+            TotalServicesCreated = await _context.Shipments.CountAsync(s =>
+                s.CreatedByDataEncoderId == currentUserId.Value &&
+                s.RecordStatus == RecordStatus.Active, cancellationToken),
+            PendingServiceApprovals = await _context.Shipments.CountAsync(s =>
+                s.CreatedByDataEncoderId == currentUserId.Value &&
+                s.RecordStatus == RecordStatus.Active &&
+                s.Status == ShipmentStatus.Submitted, cancellationToken),
+            DraftServices = await _context.Shipments.CountAsync(s =>
+                s.CreatedByDataEncoderId == currentUserId.Value &&
+                s.RecordStatus == RecordStatus.Active &&
+                s.Status == ShipmentStatus.Draft, cancellationToken),
             DueWithin48Hours = await _context.Shipments.CountAsync(s =>
                 s.CreatedByDataEncoderId == currentUserId.Value &&
+                s.RecordStatus == RecordStatus.Active &&
                 serviceReviewStatuses.Contains(s.Status) &&
                 s.CreateAt > now.AddHours(-48) &&
-                s.CreateAt <= now)
+                s.CreateAt <= now,
+                cancellationToken)
         };
 
         // Get recent activities
         var recentCustomersList = await _context.Customers
-            .Include(c => c.User)
-            .Where(c => c.CreatedByDataEncoderId == currentUserId.Value)
+            .AsNoTracking()
+            .Where(c =>
+                c.CreatedByDataEncoderId == currentUserId.Value &&
+                c.RecordStatus == RecordStatus.Active)
             .OrderByDescending(c => c.CreateAt)
             .Take(5)
-            .ToListAsync();
+            .ToListAsync(cancellationToken);
 
-        dashboard.RecentCustomers = recentCustomersList.Adapt<List<Customer>>();
-        
-    // DTO mapping
+        dashboard.RecentCustomers = recentCustomersList.Adapt<List<CustomerDetail>>();
 
         dashboard.RecentServices = await _context.Shipments
             .AsNoTracking()
-            .Where(s => s.CreatedByDataEncoderId == currentUserId.Value)
+            .Where(s =>
+                s.CreatedByDataEncoderId == currentUserId.Value &&
+                s.RecordStatus == RecordStatus.Active)
             .OrderByDescending(s => s.CreateAt)
             .Take(5)
             .Select(service => new ShipmentDetail
@@ -496,11 +683,15 @@ public class DataEncoderController : BaseController
                 RiskLevel = service.RiskLevel,
                 CustomerId = service.ImporterId,
                 ImporterName = _context.Customers
-                    .Where(customer => customer.UserId == service.ImporterId)
+                    .Where(customer =>
+                        customer.UserId == service.ImporterId &&
+                        customer.RecordStatus == RecordStatus.Active)
                     .Select(customer => customer.BusinessName)
                     .FirstOrDefault() ?? string.Empty,
                 ImporterTinNumber = _context.Customers
-                    .Where(customer => customer.UserId == service.ImporterId)
+                    .Where(customer =>
+                        customer.UserId == service.ImporterId &&
+                        customer.RecordStatus == RecordStatus.Active)
                     .Select(customer => customer.TINNumber)
                     .FirstOrDefault() ?? string.Empty,
                 AssignedCaseExecutorId = service.AssignedCaseExecutorId,
@@ -511,63 +702,20 @@ public class DataEncoderController : BaseController
                     : null,
                 LastUpdateDate = service.UpdatedAt
             })
-            .ToListAsync();
+            .ToListAsync(cancellationToken);
 
         return HandleSuccessResponse(dashboard);
     }
 
-    private async Task CreateServiceStages(long serviceId, ServiceType serviceType)
+    private async Task<bool> IsDataEncoder(long userId, CancellationToken cancellationToken)
     {
-        var stages = new List<ShipmentStage>
-        {
-            ShipmentStage.PrepaymentInvoice,
-            ShipmentStage.DropRisk,
-            ShipmentStage.DeliveryOrder,
-            ShipmentStage.Inspection,
-            ShipmentStage.Emergency,
-            ShipmentStage.Clearance,
-            ShipmentStage.Transportation,
-            ShipmentStage.AssessmentandTaxPayment,
-            ShipmentStage.WarehouseStatus,
-            ShipmentStage.TransitPermission,
-            ShipmentStage.Amendment,
-            ShipmentStage.ExitandStoragePayment,
-
-
-
-        };
-        // Add unimodal-specific stages
-        if (serviceType == ServiceType.Unimodal)
-        {
-            stages.Add(ShipmentStage.LocalPermission);
-            stages.Add(ShipmentStage.Arrival);
-        }
-
-        foreach (var stage in stages)
-        {
-            var serviceStage = ServiceStageExecution.Create(serviceId, stage);
-            _context.ShipmentStages.Add(serviceStage);
-        }
-
-        await _context.SaveChangesAsync();
-    }
-
-    private long? GetCurrentUserId()
-    {
-        var authorizationHeader = _httpContextAccessor.HttpContext?.Request.Headers["Authorization"].ToString();
-        if (string.IsNullOrEmpty(authorizationHeader) || !authorizationHeader.StartsWith("Bearer "))
-            return null;
-
-        return 1; // This should be extracted from the JWT token
-    }
-
-    private async Task<bool> IsDataEncoder(long userId)
-    {
-        var user = await _context.Users
-            .Include(u => u.UserRoles)
-            .ThenInclude(ur => ur.Role)
-            .FirstOrDefaultAsync(u => u.Id == userId);
-
-        return user?.UserRoles.Any(ur => ur.Role.Name == "DataEncoder") ?? false;
+        return await _context.UserRoles
+            .AsNoTracking()
+            .AnyAsync(userRole =>
+                userRole.UserId == userId &&
+                userRole.User.RecordStatus == RecordStatus.Active &&
+                userRole.Role.RecordStatus == RecordStatus.Active &&
+                userRole.Role.Name.ToLower() == "dataencoder",
+                cancellationToken);
     }
 }
