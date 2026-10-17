@@ -295,11 +295,7 @@ public class DataEncoderController : BaseController
             null);
         service.SetCreatedByDataEncoder(currentUserId.Value);
         service.AssignmentNotes = request.Notes?.Trim();
-
-        foreach (var stage in DefaultServiceWorkflowStages.CreateFor(service, serviceType.Value))
-        {
-            service.AddStage(stage);
-        }
+        service.EnsureWorkflowStages();
 
         _context.Shipments.Add(service);
         await _context.SaveChangesAsync(cancellationToken);
@@ -360,8 +356,11 @@ public class DataEncoderController : BaseController
                     transport => transport.ServiceStageId.HasValue &&
                                  stageIds.Contains(transport.ServiceStageId.Value),
                     cancellationToken));
+            var currentServiceType = service.ServiceType ?? (service.Mode == TransportMode.UniModalRoad
+                ? ServiceType.Unimodal
+                : ServiceType.Multimodal);
             var hasProgress = existingStages.Any(stage =>
-                stage.Status != (stage.SequenceOrder == 1 ? StageStatus.InProgress : StageStatus.NotStarted));
+                stage.Status != Shipment.GetInitialWorkflowStageStatus(currentServiceType, stage.Stage));
 
             if (hasStageData || hasProgress)
                 return Conflict("The service type cannot be changed after workflow stage activity has started.");
@@ -372,10 +371,7 @@ public class DataEncoderController : BaseController
         service.UpdateServiceType(request.ServiceType);
         if (serviceTypeChanged)
         {
-            foreach (var stage in DefaultServiceWorkflowStages.CreateFor(service, request.ServiceType))
-            {
-                service.AddStage(stage);
-            }
+            service.EnsureWorkflowStages();
         }
 
         await _context.SaveChangesAsync(cancellationToken);
@@ -466,11 +462,7 @@ public class DataEncoderController : BaseController
             .AnyAsync(stage => stage.ShipmentId == service.Id, cancellationToken);
         if (!stagesExist)
         {
-            var serviceType = service.ServiceType ?? ServiceType.Multimodal;
-            foreach (var stage in DefaultServiceWorkflowStages.CreateFor(service, serviceType))
-            {
-                service.AddStage(stage);
-            }
+            service.EnsureWorkflowStages();
         }
 
         service.Submit();

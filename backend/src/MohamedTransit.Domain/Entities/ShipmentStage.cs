@@ -51,10 +51,14 @@ public class ServiceStageExecution : BaseEntity
         };
     }
 
-    public void UpdateStatus(StageStatus status, string? comments = null)
+    public void UpdateStatus(StageStatus status, string? comments = null, long? updatedByUserId = null)
     {
         Status = status;
         Comments = comments;
+        if (updatedByUserId.HasValue)
+        {
+            UpdatedByUserId = updatedByUserId.Value;
+        }
 
         if (status == StageStatus.InProgress && !StartedAt.HasValue)
         {

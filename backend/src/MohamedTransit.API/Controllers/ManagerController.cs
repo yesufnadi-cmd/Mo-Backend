@@ -9,7 +9,6 @@ using MohamedTransit.API.DTO.MOT.Request;
 using MohamedTransit.API.DTO.MOT.Response;
 using MohamedTransit.API.Helpers;
 using MohamedTransit.Application;
-using MohamedTransit.Application.Queries.Manager;
 using MohamedTransit.Domain.Data;
 using MohamedTransit.Domain.Entities;
 
@@ -180,23 +179,6 @@ public class ManagerController : BaseController
 
         return HandleSuccessResponse(dashboard);
     }
-    [HttpGet("GetServiceById/{serviceId}")]
-public async Task<IActionResult> GetServiceById(long serviceId)
-{
-    var result = await _mediator.Send(new GetServiceByIdQuery(serviceId));
-    if (result.IsError)
-    {
-        return NotFound(result);
-    }
-    return Ok(result);
-}
-[HttpGet("GetStageDocuments/{serviceId}")]
-public async Task<IActionResult> GetStageDocuments(long serviceId)
-{
-    var result = await _mediator.Send(new GetStageDocumentsQuery(serviceId));
-    return Ok(result);
-}
-
     /// <summary>
     /// Get live reporting metrics for the manager analytics page.
     /// </summary>
@@ -537,7 +519,6 @@ public async Task<IActionResult> GetStageDocuments(long serviceId)
             return BadRequest("A valid service ID is required.");
 
         var service = await _context.Shipments
-            .AsNoTracking()
             .AsSplitQuery()
             .Include(s => s.Importer)
             .Include(s => s.AssignedCaseExecutor)
@@ -559,6 +540,28 @@ public async Task<IActionResult> GetStageDocuments(long serviceId)
 
         if (service == null)
             return NotFound("Service not found");
+
+        if (service.EnsureWorkflowStages())
+            await _context.SaveChangesAsync(cancellationToken);
+
+        var isUnimodal = service.ServiceType == ServiceType.Unimodal ||
+                         service.Mode == TransportMode.UniModalRoad;
+        var workflowStages = service.Stages
+            .Where(stage => stage.RecordStatus == RecordStatus.Active)
+            .Where(stage => !isUnimodal || stage.Stage is
+                ShipmentStage.LocalPermission or
+                ShipmentStage.Arrival or
+                ShipmentStage.ClearanceRequest)
+            .OrderBy(stage => isUnimodal
+                ? stage.Stage switch
+                {
+                    ShipmentStage.LocalPermission => 1,
+                    ShipmentStage.Arrival => 2,
+                    ShipmentStage.ClearanceRequest => 3,
+                    _ => int.MaxValue
+                }
+                : (int)stage.Stage)
+            .ToList();
 
         var customer = await _context.Customers
             .AsNoTracking()
@@ -648,20 +651,29 @@ public async Task<IActionResult> GetStageDocuments(long serviceId)
                     service.AssignedAssessor.Email,
                     service.AssignedAssessor.Phone
                 },
-            Stages = service.Stages
-                .Where(stage => stage.RecordStatus == RecordStatus.Active)
-                .OrderBy(stage => stage.Stage)
-                .Select(stage => new
+            Stages = workflowStages
+                .Select((stage, index) => new
                 {
                     stage.Id,
                     stage.Stage,
+                    Title = GetStageTitle(stage.Stage),
+                    StepNumber = index + 1,
                     stage.Status,
+                    StatusText = GetStageStatusText(stage.Status),
                     stage.Comments,
                     stage.RequiresCustomerAction,
                     stage.IsBlocked,
                     stage.BlockReason,
                     stage.StartedAt,
                     stage.CompletedAt,
+                    Workspace = new
+                    {
+                        stage.InspectionType,
+                        stage.StageSpot,
+                        stage.SpotComment,
+                        stage.RiskNotes,
+                        stage.AssignedTo
+                    },
                     Documents = stage.Documents
                         .Where(document => document.RecordStatus == RecordStatus.Active)
                         .Select(document => new
@@ -1520,6 +1532,34 @@ public async Task<IActionResult> GetStageDocuments(long serviceId)
         return HandleSuccessResponse(activities);
     }
 
+
+    private static string GetStageTitle(ShipmentStage stage) => stage switch
+    {
+        ShipmentStage.PrepaymentInvoice => "Prepayment Invoice",
+        ShipmentStage.TransitPermission => "Transit Permission",
+        ShipmentStage.Amendment => "Amendment",
+        ShipmentStage.DropRisk => "Drop Risk",
+        ShipmentStage.DeliveryOrder => "Delivery Order",
+        ShipmentStage.WarehouseStatus => "Warehouse Status",
+        ShipmentStage.Inspection => "Inspection",
+        ShipmentStage.AssessmentandTaxPayment => "Assessment and Tax Payment",
+        ShipmentStage.Emergency => "Emergency",
+        ShipmentStage.ExitandStoragePayment => "Exit and Storage Payment",
+        ShipmentStage.Transportation => "Transportation",
+        ShipmentStage.LocalPermission => "Local Permission",
+        ShipmentStage.Arrival => "Arrival",
+        ShipmentStage.Clearance => "Clearance",
+        ShipmentStage.ClearanceRequest => "Clearance Request",
+        _ => stage.ToString()
+    };
+
+    private static string GetStageStatusText(StageStatus status) => status switch
+    {
+        StageStatus.InProgress => "In progress",
+        StageStatus.NotStarted => "Not started",
+        StageStatus.NeedsReview => "Needs review",
+        _ => status.ToString()
+    };
 
     private async Task<bool> IsManager(long userId)
     {

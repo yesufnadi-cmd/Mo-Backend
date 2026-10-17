@@ -1,6 +1,6 @@
 ﻿using Mapster;
-
 using MediatR;
+using System.Security.Claims;
 
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -118,9 +118,26 @@ public class ShipmentsController : BaseController
     [HttpPut("UpdateServiceStage")]
     public async Task<IActionResult> UpdateServiceStage([FromBody] UpdateServiceStageRequest request, CancellationToken ct)
     {
+        if (User.Identity?.IsAuthenticated != true)
+            return Unauthorized("User not authenticated");
+
+        if (!Enum.IsDefined(typeof(StageStatus), request.Status))
+            return BadRequest("A valid stage status is required.");
+
+        var claimUserIdValue = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+            ?? User.FindFirst("id")?.Value
+            ?? User.FindFirst("sub")?.Value;
+        long? authenticatedUserId = long.TryParse(claimUserIdValue, out var parsedUserId) && parsedUserId > 0
+            ? parsedUserId
+            : null;
+
         var command = request.Adapt<UpdateServiceStageCommand>();
+        command.UpdatedByUserId = authenticatedUserId ?? 0;
         var result = await _mediator.Send(command, ct);
-        return Ok(result);
+
+        return result.IsError
+            ? HandleErrorResponse(result.Errors)
+            : HandleSuccessResponse(result.Payload, result.Message);
     }
 
    

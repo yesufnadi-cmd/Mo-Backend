@@ -164,6 +164,65 @@ public class Shipment : BaseEntity
         Messages.Add(message);
         SetUpdated();
     }
+
+    public bool EnsureWorkflowStages()
+    {
+        var serviceType = ServiceType ?? (Mode == TransportMode.UniModalRoad
+            ? global::MohamedTransit.Domain.Common.ServiceType.Unimodal
+            : global::MohamedTransit.Domain.Common.ServiceType.Multimodal);
+        var workflow = serviceType == global::MohamedTransit.Domain.Common.ServiceType.Unimodal
+            ? new[]
+            {
+                (ShipmentStage.LocalPermission, StageStatus.Completed),
+                (ShipmentStage.Arrival, StageStatus.InProgress),
+                (ShipmentStage.ClearanceRequest, StageStatus.NotStarted)
+            }
+            : Enum.GetValues<ShipmentStage>()
+                .Where(stage => stage is not (ShipmentStage.LocalPermission or
+                    ShipmentStage.Arrival or ShipmentStage.ClearanceRequest))
+                .Select(stage => (
+                    stage,
+                    stage == ShipmentStage.PrepaymentInvoice
+                        ? StageStatus.InProgress
+                        : StageStatus.NotStarted))
+                .ToArray();
+
+        var added = false;
+        foreach (var (stage, initialStatus) in workflow)
+        {
+            if (Stages.Any(existing =>
+                    existing.Stage == stage && existing.RecordStatus == RecordStatus.Active))
+                continue;
+
+            var execution = ServiceStageExecution.Create(Id, stage);
+            execution.Shipment = this;
+            execution.UpdateStatus(initialStatus);
+            Stages.Add(execution);
+            added = true;
+        }
+
+        return added;
+    }
+
+    public static StageStatus GetInitialWorkflowStageStatus(
+        ServiceType serviceType,
+        ShipmentStage stage)
+    {
+        if (serviceType == global::MohamedTransit.Domain.Common.ServiceType.Unimodal)
+        {
+            return stage switch
+            {
+                ShipmentStage.LocalPermission => StageStatus.Completed,
+                ShipmentStage.Arrival => StageStatus.InProgress,
+                _ => StageStatus.NotStarted
+            };
+        }
+
+        return stage == ShipmentStage.PrepaymentInvoice
+            ? StageStatus.InProgress
+            : StageStatus.NotStarted;
+    }
+
     public void UpdateRiskLevel(RiskLevel? riskLevel)
     {
         RiskLevel = riskLevel;
