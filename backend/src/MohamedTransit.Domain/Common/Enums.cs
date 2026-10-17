@@ -178,4 +178,5 @@ public enum ShipmentStage
     LocalPermission = 12, // Unimodal only
     Arrival = 13, // Unimodal only
     Clearance = 14,
+    ClearanceRequest = 15 // Unimodal only
 }

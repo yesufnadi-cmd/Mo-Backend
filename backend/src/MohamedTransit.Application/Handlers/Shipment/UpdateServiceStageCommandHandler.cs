@@ -1,5 +1,8 @@
-﻿using MediatR;
+﻿using System.Security.Claims;
 
+using MediatR;
+
+using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 
 using MohamedTransit.Application;
@@ -13,19 +16,22 @@ namespace MohamedTransit.Application.Handlers.ShipmentStageHandler;
 internal class UpdateServiceStageCommandHandler : IRequestHandler<UpdateServiceStageCommand, OperationResult<ServiceStageExecution>>
 {
     private readonly ApplicationDbContext _context;
+    private readonly IHttpContextAccessor _httpContextAccessor;
 
-    public UpdateServiceStageCommandHandler(ApplicationDbContext context)
+    public UpdateServiceStageCommandHandler(
+        ApplicationDbContext context,
+        IHttpContextAccessor httpContextAccessor)
     {
         _context = context;
+        _httpContextAccessor = httpContextAccessor;
     }
 
     public async Task<OperationResult<ServiceStageExecution>> Handle(UpdateServiceStageCommand request, CancellationToken cancellationToken)
     {
         var result = new OperationResult<ServiceStageExecution>();
 
-        // 1. ServiceStageExecution መኖሩን ከነ ShipmentId ማረጋገጥ
-        // (ማስታወሻ፡ በ ApplicationDbContext ላይ ያለው DbSet 'ServiceStageExecutions' ከሆነ እሱን ተቀቀሚ)
         var stageExecution = await _context.ServiceStageExecutions
+            .Include(s => s.Shipment)
             .FirstOrDefaultAsync(s => s.Id == request.ShipmentStageId && s.ShipmentId == request.ShipmentId, cancellationToken);
 
         if (stageExecution == null)
@@ -34,18 +40,47 @@ internal class UpdateServiceStageCommandHandler : IRequestHandler<UpdateServiceS
             return result;
         }
 
-        // 2. የሚያሻሽለው ተጠቃሚ (UpdatedByUserId) በዳታቤዝ ውስጥ መኖሩን ማረጋገጥ
-        var userExists = await _context.Users
-            .AnyAsync(u => u.Id == request.UpdatedByUserId, cancellationToken);
-
-        if (!userExists)
+        var updatedByUserId = request.UpdatedByUserId;
+        if (updatedByUserId <= 0)
         {
-            result.AddError(ErrorCode.NotFound, $"User with ID '{request.UpdatedByUserId}' was not found.");
-            return result;
+            var userIdClaim = _httpContextAccessor.HttpContext?.User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                ?? _httpContextAccessor.HttpContext?.User.FindFirst("id")?.Value
+                ?? _httpContextAccessor.HttpContext?.User.FindFirst("sub")?.Value;
+            updatedByUserId = long.TryParse(userIdClaim, out var claimUserId) && claimUserId > 0
+                ? claimUserId
+                : 0;
         }
 
-        // 3. Status እና Comments/Notes ማሻሻል (የ Entityው UpdateStatus method በመጠቀም)
-        stageExecution.UpdateStatus(request.Status, request.Notes);
+        var candidateUserIds = new long?[]
+            {
+                updatedByUserId > 0 ? updatedByUserId : null,
+                stageExecution.Shipment?.AssignedCaseExecutorId,
+                stageExecution.Shipment?.AssignedAssessorId
+            }
+            .Where(userId => userId is > 0)
+            .Select(userId => userId!.Value)
+            .Distinct()
+            .ToArray();
+
+        var existingUserIds = candidateUserIds.Length == 0
+            ? new List<long>()
+            : await _context.Users
+                .Where(user => candidateUserIds.Contains(user.Id) && user.RecordStatus == RecordStatus.Active)
+                .Select(user => user.Id)
+                .ToListAsync(cancellationToken);
+
+        long? resolvedUpdatedByUserId = candidateUserIds
+            .Where(existingUserIds.Contains)
+            .Select(userId => (long?)userId)
+            .FirstOrDefault();
+
+        resolvedUpdatedByUserId ??= await _context.Users
+            .Where(user => user.RecordStatus == RecordStatus.Active)
+            .OrderBy(user => user.Id)
+            .Select(user => (long?)user.Id)
+            .FirstOrDefaultAsync(cancellationToken);
+
+        stageExecution.UpdateStatus(request.Status, request.Notes, resolvedUpdatedByUserId);
 
         // 4. ለውጦችን Save ማድረግ
         await _context.SaveChangesAsync(cancellationToken);

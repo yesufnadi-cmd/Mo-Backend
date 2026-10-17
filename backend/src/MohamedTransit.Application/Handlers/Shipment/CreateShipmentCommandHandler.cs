@@ -49,6 +49,10 @@ public class CreateShipmentCommandHandler
             request.Destination,                         // 8. destination
             request.ImporterId                           // 9. createdByUserI//d
         );
+        shipment.UpdateServiceType(request.Mode == TransportMode.UniModalRoad
+            ? ServiceType.Unimodal
+            : ServiceType.Multimodal);
+        shipment.EnsureWorkflowStages();
         _context.Shipments.Add(shipment);
 
         await _context.SaveChangesAsync(cancellationToken);

@@ -6,7 +6,7 @@ namespace MohamedTransit.API.Validation;
 
 public class JwtSettingsValidator : IValidateOptions<JwtSettings>
 {
-    public ValidateOptionsResult Validate(string name, JwtSettings options)
+    public ValidateOptionsResult Validate(string? name, JwtSettings options)
     {
         if (options == null)
             return ValidateOptionsResult.Fail("JwtSettings configuration is missing.");
